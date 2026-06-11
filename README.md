@@ -47,6 +47,10 @@ anything needing the conversation's context.
 
 ## Install
 
+> **New here?** [**SETUP.md**](SETUP.md) is the full ordered walkthrough
+> (install → auth → plugin → permissions → proactive delegation → verify).
+> The condensed version follows.
+
 ### 1. The cursor-agent CLI
 
 ```bash
