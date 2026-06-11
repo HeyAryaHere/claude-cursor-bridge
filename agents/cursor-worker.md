@@ -1,6 +1,6 @@
 ---
 name: cursor-worker
-description: Delegation manager that hands well-scoped, mechanical coding tasks to Cursor models (Composer etc.) via the cursor-agent CLI, then reviews the resulting git diff. Use PROACTIVELY when a coding task is self-contained and mechanical - boilerplate or CRUD code, scoped rename/extract refactors, test scaffolding for existing code, repetitive multi-file edits, or applying an established pattern to new code. Do NOT use for architecture or API design decisions, security-sensitive code (auth, crypto, secrets, payments), debugging that depends on conversation context, tasks outside a git repository, or vague/underspecified work - handle those directly instead.
+description: Hands substantial, well-scoped mechanical coding to Cursor models (Composer etc.) via the cursor-agent CLI, then reviews the returned git diff. USE PROACTIVELY and BY DEFAULT - prefer this over editing files yourself - whenever a task is mechanical and self-contained in a git repo: implementing features, modules, or functions from a clear spec; writing or scaffolding whole test suites; scoped or repetitive refactors and multi-file edits (renames, extractions, applying an established pattern across files); boilerplate, CRUD, config, codegen. Do NOT use for trivial one-liners or quick fixes (delegation overhead isn't worth it), architecture/API/design decisions, security-sensitive code (auth, crypto, secrets, payments), debugging that depends on conversation context, or work outside a git repository - handle those directly instead.
 tools: Bash, Read, Grep, Glob
 model: sonnet
 maxTurns: 25
@@ -24,8 +24,9 @@ change through other means.
    `--resume <chat_id>` so the worker keeps its context. After a failed
    retry, report honestly and stop.
 4. If the task turns out to be unsuitable for delegation (vague, needs
-   design judgment, touches security-sensitive code), say so and hand it
-   back instead of delegating anyway.
+   design judgment, touches security-sensitive code, or is trivial enough
+   that the round-trip overhead isn't worth it), say so and hand it back
+   instead of delegating anyway.
 
 ## Workflow
 

@@ -140,6 +140,34 @@ BRIEF
   (not the worker's claims), runs the narrowest relevant test, and retries at
   most once via `--resume`. It never commits — the diff stays in your tree.
 
+## Tuning how often Claude delegates
+
+The agent's `description` is what tells the orchestrator (e.g. Opus) *when* to
+delegate — but the orchestrator has a strong bias to just edit files itself, so
+the description alone tends to under-trigger. The reliable lever is a standing
+instruction in your **`~/.claude/CLAUDE.md`** (loaded every session, highest
+priority). A balanced directive — delegate substantial mechanical work, keep
+trivial one-liners — looks like:
+
+```markdown
+# Delegating coding work to Cursor (claude-cursor-bridge)
+
+When the `cursor-worker` subagent is available and you're in a git repo, prefer
+delegating substantial mechanical coding to it instead of writing it yourself:
+implementing features/modules from a clear spec, whole test suites, scoped or
+repetitive multi-file refactors, boilerplate/CRUD/codegen.
+
+Do it yourself for: trivial one-liners/quick fixes (overhead isn't worth it),
+architecture/API/design decisions, security-sensitive code (auth, crypto,
+secrets, payments), context-dependent debugging, or non-git directories.
+
+When delegating, give a self-contained brief and review the returned diff.
+```
+
+Dial it up (delegate almost everything mechanical) or down (only on explicit
+request) by editing that directive. Each delegation costs ~30–60s and real
+Cursor quota, so delegating trivial edits is usually net-negative.
+
 ## Configuration
 
 Precedence: CLI flag > environment > config file > default.
