@@ -100,12 +100,13 @@ mkdir -p /tmp/bridge-smoke && cd /tmp/bridge-smoke && git init -q
 printf 'def add(a, b):\n    return a + b\n' > calc.py && git add -A && git commit -qm seed
 ```
 
-Then, in a Claude Code session in that directory, ask naturally:
+Then, in a Claude Code session in that directory, try both modes:
 
-> "Add a subtract function to calc.py plus a pytest test."
+> "Add a subtract function to calc.py plus a pytest test."  → *edit*: delegates, reviews the diff
+> "What does this repo do?"                                 → *ask*: read-only summary, no changes
 
-Expect Claude to delegate to `cursor-worker`, then review the diff. Confirm a
-run was logged:
+Expect Claude to delegate to `cursor-worker`. Confirm runs were logged (the
+`mode=` field shows which mode each used):
 
 ```bash
 tail ~/.cache/claude-cursor-bridge/runs.log

@@ -1,37 +1,46 @@
 #!/bin/bash
-# cursor-bridge-run — sanctioned entry point for delegating a coding task to a
-# Cursor model via the headless cursor-agent CLI (part of claude-cursor-bridge).
+# cursor-bridge-run — sanctioned entry point for delegating to a Cursor model
+# via the headless cursor-agent CLI (part of claude-cursor-bridge).
+#
+# Two modes:
+#   edit (default) — the worker edits files autonomously (--force); the git
+#                    diff is the contract. Requires a git repo; takes a lock.
+#   ask (--ask)    — read-only: the worker investigates the codebase / answers
+#                    a question. No --force, no edits, no diff, no lock, and a
+#                    git repo is not required.
 #
 # Must work on stock macOS /bin/bash 3.2: no GNU coreutils, no `timeout`,
 # no associative arrays, no ${var,,}.
 
 set -o pipefail
 
-VERSION="0.1.0"
+VERSION="0.2.0"
 
 usage() {
   cat <<'EOF'
 Usage: cursor-bridge-run [options] [PROMPT|-]
 
-Delegate a self-contained coding task to a Cursor model inside the current
-git repository. The worker edits files autonomously (--force); the resulting
-git diff is the contract. A result block is printed for the caller to review.
+Delegate to a Cursor model. Default (edit) mode runs the worker with --force so
+it edits files inside the current git repo; the resulting git diff is the
+contract. With --ask it runs read-only: the worker investigates / answers and
+makes no changes (no git repo required).
 
 Options:
+  --ask              Read-only mode: investigate / answer; no edits, no diff
   -C <dir>           Run in <dir> instead of the current directory
   --model <name>     Cursor model (default: auto; see --list-models)
   --timeout <secs>   Kill the worker after <secs> seconds (default: 600)
-  --resume <chatId>  Continue an existing cursor-agent chat (for fix-up retries)
+  --resume <chatId>  Continue an existing cursor-agent chat
   --json             Emit the result block as JSON (requires jq)
   --list-models      List models available to your Cursor account and exit
   --version          Print version and exit
   -h, --help         Show this help
 
-PROMPT is the task brief. Pass '-' (or pipe stdin) to read it from stdin —
-recommended for multi-line briefs.
+PROMPT is the task brief or question. Pass '-' (or pipe stdin) to read it from
+stdin — recommended for multi-line input.
 
 Exit codes:
-  0 ok          2 usage error      3 not a git repo
+  0 ok          2 usage error      3 not a git repo (edit mode only)
   4 cursor-agent not installed     5 repo lock held by another worker
   6 timeout     7 worker exited non-zero
 EOF
@@ -57,6 +66,7 @@ CFG_MODEL="${CURSOR_BRIDGE_MODEL:-}"
 CFG_TIMEOUT="${CURSOR_BRIDGE_TIMEOUT:-}"
 CFG_LOG_DIR="${CURSOR_BRIDGE_LOG_DIR:-}"
 
+MODE="edit"
 FLAG_MODEL=""
 FLAG_TIMEOUT=""
 RESUME_ID=""
@@ -68,6 +78,7 @@ PROMPT_SET=0
 
 while [ $# -gt 0 ]; do
   case "$1" in
+    --ask)         MODE="ask"; shift ;;
     -C)            [ $# -ge 2 ] || { err "-C needs an argument"; exit 2; }; RUN_DIR="$2"; shift 2 ;;
     --model)       [ $# -ge 2 ] || { err "--model needs an argument"; exit 2; }; FLAG_MODEL="$2"; shift 2 ;;
     --timeout)     [ $# -ge 2 ] || { err "--timeout needs an argument"; exit 2; }; FLAG_TIMEOUT="$2"; shift 2 ;;
@@ -108,11 +119,13 @@ if [ -n "$RUN_DIR" ]; then
 fi
 
 GIT_DIR=$(git rev-parse --absolute-git-dir 2>/dev/null)
-if [ -z "$GIT_DIR" ]; then
-  err "not inside a git repository — refusing to run an autonomous worker without version control."
+REPO_ROOT=$(git rev-parse --show-toplevel 2>/dev/null)
+if [ "$MODE" = "edit" ] && [ -z "$GIT_DIR" ]; then
+  err "not inside a git repository — refusing to run an autonomous editing worker without version control."
+  err "(for a read-only question use --ask, which does not require git.)"
   exit 3
 fi
-REPO_ROOT=$(git rev-parse --show-toplevel)
+[ -n "$REPO_ROOT" ] || REPO_ROOT=$(pwd)
 
 if [ -z "$PROMPT" ] || [ "$PROMPT" = "-" ]; then
   if [ -t 0 ]; then
@@ -127,8 +140,8 @@ if [ -z "$PROMPT" ]; then
   exit 2
 fi
 
-# ---------------- lock (one worker per repo) ------------------------------
-LOCK_DIR="$GIT_DIR/cursor-bridge.lock"
+# ---------------- lock (one editing worker per repo; edit mode only) -------
+LOCK_DIR=""
 OLD_PID=""
 
 acquire_lock() {
@@ -149,10 +162,13 @@ acquire_lock() {
   return 1
 }
 
-if ! acquire_lock; then
-  err "another cursor-bridge worker is already running in this repo (pid ${OLD_PID:-unknown})."
-  err "lock: $LOCK_DIR — wait for it to finish, or remove the lock if you are sure it is dead."
-  exit 5
+if [ "$MODE" = "edit" ]; then
+  LOCK_DIR="$GIT_DIR/cursor-bridge.lock"
+  if ! acquire_lock; then
+    err "another cursor-bridge worker is already running in this repo (pid ${OLD_PID:-unknown})."
+    err "lock: $LOCK_DIR — wait for it to finish, or remove the lock if you are sure it is dead."
+    exit 5
+  fi
 fi
 
 BASE_STATUS=""
@@ -160,7 +176,7 @@ AFTER_STATUS=""
 OUT_FILE=""
 
 cleanup() {
-  rm -rf "$LOCK_DIR" 2>/dev/null
+  [ -n "$LOCK_DIR" ]     && rm -rf "$LOCK_DIR"    2>/dev/null
   [ -n "$BASE_STATUS" ]  && rm -f "$BASE_STATUS"  2>/dev/null
   [ -n "$AFTER_STATUS" ] && rm -f "$AFTER_STATUS" 2>/dev/null
   [ -n "$OUT_FILE" ]     && rm -f "$OUT_FILE"     2>/dev/null
@@ -170,21 +186,24 @@ trap 'exit 130' INT
 trap 'exit 143' TERM
 
 # ---------------- run ------------------------------------------------------
-BASE_STATUS=$(mktemp -t cbridge-base) || exit 1
-AFTER_STATUS=$(mktemp -t cbridge-after) || exit 1
 OUT_FILE=$(mktemp -t cbridge-out) || exit 1
 
-git status --porcelain > "$BASE_STATUS" 2>/dev/null
+if [ "$MODE" = "edit" ]; then
+  BASE_STATUS=$(mktemp -t cbridge-base) || exit 1
+  AFTER_STATUS=$(mktemp -t cbridge-after) || exit 1
+  git status --porcelain > "$BASE_STATUS" 2>/dev/null
+fi
 
 CHAT_ID="$RESUME_ID"
 if [ -z "$CHAT_ID" ]; then
-  # a known chat id lets the caller retry with --resume; degrade gracefully
+  # a known chat id lets the caller continue with --resume; degrade gracefully
   CHAT_ID=$(cursor-agent create-chat 2>/dev/null | tr -d '[:space:]')
 fi
 
 START_TS=$(date +%s)
 
-set -- --print --force --trust --output-format text --model "$MODEL"
+set -- --print --trust --output-format text --model "$MODEL"
+[ "$MODE" = "edit" ] && set -- "$@" --force
 if [ -n "$CHAT_ID" ]; then
   set -- "$@" --resume "$CHAT_ID"
 fi
@@ -219,34 +238,43 @@ elif [ "$AGENT_EXIT" -ne 0 ]; then
 fi
 
 # ---------------- collect results -----------------------------------------
-git status --porcelain > "$AFTER_STATUS" 2>/dev/null
-CHANGED=$(comm -13 <(sort "$BASE_STATUS") <(sort "$AFTER_STATUS") 2>/dev/null)
-DIFF_STAT=$(git diff HEAD --stat 2>/dev/null)
+CHANGED=""
+DIFF_STAT=""
+if [ "$MODE" = "edit" ]; then
+  git status --porcelain > "$AFTER_STATUS" 2>/dev/null
+  CHANGED=$(comm -13 <(sort "$BASE_STATUS") <(sort "$AFTER_STATUS") 2>/dev/null)
+  DIFF_STAT=$(git diff HEAD --stat 2>/dev/null)
+fi
 
 mkdir -p "$LOG_DIR" 2>/dev/null
-printf '%s\trepo=%s\tmodel=%s\tstatus=%s\tagent_exit=%s\tduration_s=%s\tchat_id=%s\n' \
-  "$(date '+%Y-%m-%dT%H:%M:%S%z')" "$REPO_ROOT" "$MODEL" "$STATUS" "$AGENT_EXIT" \
+printf '%s\tmode=%s\trepo=%s\tmodel=%s\tstatus=%s\tagent_exit=%s\tduration_s=%s\tchat_id=%s\n' \
+  "$(date '+%Y-%m-%dT%H:%M:%S%z')" "$MODE" "$REPO_ROOT" "$MODEL" "$STATUS" "$AGENT_EXIT" \
   "$DURATION" "${CHAT_ID:-unknown}" >> "$LOG_DIR/runs.log" 2>/dev/null
 
 emit_text() {
   printf '=== CURSOR-BRIDGE RESULT ===\n'
+  printf 'mode: %s\n' "$MODE"
   printf 'status: %s\n' "$STATUS"
   printf 'agent_exit: %s\n' "$AGENT_EXIT"
   printf 'model: %s\n' "$MODEL"
   printf 'chat_id: %s\n' "${CHAT_ID:-unknown}"
   printf 'duration_s: %s\n' "$DURATION"
   printf 'repo: %s\n' "$REPO_ROOT"
-  printf -- '--- changed files (vs start of run) ---\n'
-  if [ -n "$CHANGED" ]; then printf '%s\n' "$CHANGED"; else printf '(none)\n'; fi
-  printf -- '--- git diff --stat (vs HEAD) ---\n'
-  if [ -n "$DIFF_STAT" ]; then printf '%s\n' "$DIFF_STAT"; else printf '(clean)\n'; fi
-  printf -- '--- worker output (last 80 lines) ---\n'
-  tail -n 80 "$OUT_FILE"
+  if [ "$MODE" = "edit" ]; then
+    printf -- '--- changed files (vs start of run) ---\n'
+    if [ -n "$CHANGED" ]; then printf '%s\n' "$CHANGED"; else printf '(none)\n'; fi
+    printf -- '--- git diff --stat (vs HEAD) ---\n'
+    if [ -n "$DIFF_STAT" ]; then printf '%s\n' "$DIFF_STAT"; else printf '(clean)\n'; fi
+  fi
+  if [ "$MODE" = "ask" ]; then TAIL_N=300; else TAIL_N=80; fi
+  printf -- '--- worker output (last %s lines) ---\n' "$TAIL_N"
+  tail -n "$TAIL_N" "$OUT_FILE"
   printf '=== END CURSOR-BRIDGE RESULT ===\n'
 }
 
 emit_json() {
   jq -n \
+    --arg mode "$MODE" \
     --arg status "$STATUS" \
     --arg model "$MODEL" \
     --arg chat_id "${CHAT_ID:-}" \
@@ -256,7 +284,7 @@ emit_json() {
     --rawfile output "$OUT_FILE" \
     --argjson agent_exit "$AGENT_EXIT" \
     --argjson duration_s "$DURATION" \
-    '{status: $status, agent_exit: $agent_exit, model: $model,
+    '{mode: $mode, status: $status, agent_exit: $agent_exit, model: $model,
       chat_id: $chat_id, duration_s: $duration_s, repo: $repo,
       changed_files: ($changed | split("\n") | map(select(length > 0))),
       diff_stat: $diff_stat, output: $output}'

@@ -2,27 +2,29 @@
 
 **Claude Code orchestrates. Cursor executes.**
 
-A Claude Code plugin that lets Claude (e.g. Opus) proactively delegate well-scoped,
-mechanical coding tasks to **Cursor's models** (Composer & friends) through the
-headless [`cursor-agent` CLI](https://cursor.com/docs/cli) — the only legitimate way
-to use Cursor's models outside Cursor itself. No API keys, no router proxies: your
-Claude subscription powers the orchestrator, your Cursor subscription powers the
-workers, and **the git diff is the contract** between them.
+A Claude Code plugin that turns **Cursor's models** (Composer & friends) into your
+**junior engineer**: Claude (e.g. Opus) stays the lead and proactively delegates both
+*codebase investigation* (read-only legwork) and *mechanical implementation* (edits)
+to Cursor through the headless [`cursor-agent` CLI](https://cursor.com/docs/cli) — the
+only legitimate way to use Cursor's models outside Cursor itself. No API keys, no
+router proxies: your Claude subscription powers the lead, your Cursor subscription
+powers the worker, and for edits **the git diff is the contract** between them.
 
 ```
 Claude Code session
-  Opus (orchestrator)
-    │  task matches cursor-worker description (proactive delegation)
+  Opus — the lead engineer
+    │  delegates proactively (cursor-worker description + your ~/.claude/CLAUDE.md)
     ▼
   cursor-worker subagent (Sonnet)            ← this plugin
-    │  writes self-contained brief · picks model · reviews diff · 1 retry
+    │  Investigate: ask a question, relay the findings
+    │  Implement:   brief · pick model · review diff · 1 retry
     ▼
   bin/cursor-bridge-run (bash wrapper)       ← this plugin
     │  git-repo guard · per-repo lock · timeout watchdog · result block · log
     ▼
-  cursor-agent -p --force --trust --model <m>
+  cursor-agent -p --trust --model <m>   [--force only in edit mode]
     ▼
-  shared state: your working tree + git diff
+  edit mode → your working tree + git diff   ·   ask mode → the worker's answer
 ```
 
 ## Why
@@ -30,14 +32,22 @@ Claude Code session
 Cursor's models (Composer etc.) have no public API — they are only reachable
 through Cursor's own products. But `cursor-agent` runs headless and is built for
 scripting. So instead of routing Claude Code's *requests* to other providers
-(gateway-style), this plugin treats Cursor as an **external worker**: Claude writes
-a self-contained brief, Cursor edits the files autonomously, Claude reviews the
-diff like a code reviewer and retries once with a fix-up brief if needed.
+(gateway-style), this plugin treats Cursor as an **external junior engineer**.
 
-Good delegation targets: boilerplate/CRUD, scoped rename/extract refactors, test
-scaffolding, repetitive multi-file edits. Kept away from delegation by design:
-architecture decisions, security-sensitive code (auth/crypto/secrets/payments),
-anything needing the conversation's context.
+It works in two modes:
+
+- **Investigate** (read-only) — offload legwork like "where is X", "summarize this
+  module", "what does this repo do", so the lead doesn't spend its own context. The
+  worker reads and reports; it changes nothing, and no git repo is required.
+- **Implement** (edits) — hand over a self-contained brief; Cursor edits the files
+  autonomously inside a git repo and the lead reviews the diff like a code reviewer,
+  retrying once with a fix-up brief if needed.
+
+Good delegation targets: codebase investigation/summaries, boilerplate/CRUD, scoped
+rename/extract refactors, test scaffolding, repetitive multi-file edits. Kept with
+the lead by design: architecture decisions, security-sensitive code
+(auth/crypto/secrets/payments), trivial one-liners, anything needing the
+conversation's context.
 
 ## Requirements
 
@@ -102,23 +112,33 @@ lock, timeout, audit log) is the only sanctioned entry point.
 
 ## Usage
 
-**Proactive** — just work normally. When a task matches the worker's criteria,
-Claude delegates on its own:
+**Proactive** — just work normally. When a task fits, Claude delegates on its own:
 
 > "Add a `subtract` function to calc.py plus a pytest test"
 > → Opus hands it to `cursor-worker` → Composer edits the files → the diff is
 > reviewed, tests run, and you get a verdict.
 
+> "Where is rate-limiting handled in this service?"
+> → Opus asks `cursor-worker` in read-only mode → gets a summary + file paths
+> back, without spending its own context crawling the repo.
+
 **Explicit** — mention it:
 
 > "Have the cursor worker scaffold tests for src/parser.ts"
+> "Ask cursor where the auth middleware lives"
 > or invoke directly: `@agent-claude-cursor-bridge:cursor-worker`
 
 **Manual** — the wrapper is a normal CLI you can use yourself:
 
 ```bash
 cursor-bridge-run --list-models
-cursor-bridge-run --model composer-2 - <<'BRIEF'
+
+# investigate (read-only — no git repo needed, makes no changes)
+cursor-bridge-run --ask --model gemini-3.5-flash \
+  "What does this repo do? Summarize the entry points and key modules."
+
+# implement (edits the working tree inside a git repo)
+cursor-bridge-run --model composer-2.5 - <<'BRIEF'
 GOAL: ...
 FILES: ...
 ACCEPTANCE CRITERIA: ...
@@ -127,22 +147,27 @@ BRIEF
 
 ## How it works
 
+- **Two modes** — `--ask` (read-only: investigate / answer, no edits, no diff, no
+  git repo required) and the default edit mode (worker edits the tree with
+  `--force`; the diff is the contract).
 - **Brief contract** — the worker knows nothing about your conversation; every
-  delegation is a self-contained brief (GOAL / CONTEXT / FILES / TASKS /
-  ACCEPTANCE CRITERIA / OUT OF SCOPE) piped via stdin.
-- **Git guard** — refuses to run outside a git repository (exit 3). An autonomous
-  worker without version control is how you lose work.
-- **Per-repo lock** — `.git/cursor-bridge.lock` enforces one worker per repo at a
-  time (exit 5), with stale-lock auto-recovery. Runs are serial by design in v1.
+  delegation is a self-contained brief or question piped via stdin.
+- **Git guard** — edit mode refuses to run outside a git repository (exit 3); an
+  autonomous editing worker without version control is how you lose work. Ask mode
+  has nothing to guard, so it runs anywhere.
+- **Per-repo lock** — edit mode takes `.git/cursor-bridge.lock` so only one editing
+  worker runs per repo at a time (exit 5), with stale-lock auto-recovery. Ask mode
+  takes no lock. Runs are serial by design in v1.
 - **Timeout watchdog** — default 600 s, then SIGTERM → SIGKILL (exit 6). Works on
   stock macOS bash 3.2, no GNU coreutils needed.
-- **Result block** — status, exit code, chat id (for `--resume` retries),
-  duration, changed-files delta, `git diff --stat`, and the worker's last 80
-  output lines, in one fenced block the agent parses.
-- **Audit log** — one line per run in `~/.cache/claude-cursor-bridge/runs.log`.
-- **Review loop** — the subagent checks the diff against the acceptance criteria
-  (not the worker's claims), runs the narrowest relevant test, and retries at
-  most once via `--resume`. It never commits — the diff stays in your tree.
+- **Result block** — `mode`, status, exit code, chat id (for `--resume`), duration,
+  and the worker's output; edit mode also includes the changed-files delta and
+  `git diff --stat`. One fenced block the agent parses (text or `--json`).
+- **Audit log** — one line per run (including `mode=`) in
+  `~/.cache/claude-cursor-bridge/runs.log`.
+- **Review loop** — for edits, the subagent checks the diff against the acceptance
+  criteria (not the worker's claims), runs the narrowest relevant test, and retries
+  at most once via `--resume`. It never commits — the diff stays in your tree.
 
 ## Tuning how often Claude delegates
 
@@ -150,27 +175,17 @@ The agent's `description` is what tells the orchestrator (e.g. Opus) *when* to
 delegate — but the orchestrator has a strong bias to just edit files itself, so
 the description alone tends to under-trigger. The reliable lever is a standing
 instruction in your **`~/.claude/CLAUDE.md`** (loaded every session, highest
-priority). A balanced directive — delegate substantial mechanical work, keep
-trivial one-liners — looks like:
+priority). Copy the ready-made balanced directive — it frames Cursor as your
+junior engineer and covers both investigation and implementation:
 
-```markdown
-# Delegating coding work to Cursor (claude-cursor-bridge)
-
-When the `cursor-worker` subagent is available and you're in a git repo, prefer
-delegating substantial mechanical coding to it instead of writing it yourself:
-implementing features/modules from a clear spec, whole test suites, scoped or
-repetitive multi-file refactors, boilerplate/CRUD/codegen.
-
-Do it yourself for: trivial one-liners/quick fixes (overhead isn't worth it),
-architecture/API/design decisions, security-sensitive code (auth, crypto,
-secrets, payments), context-dependent debugging, or non-git directories.
-
-When delegating, give a self-contained brief and review the returned diff.
+```bash
+cat examples/delegation-directive.md >> ~/.claude/CLAUDE.md
 ```
 
-Dial it up (delegate almost everything mechanical) or down (only on explicit
-request) by editing that directive. Each delegation costs ~30–60s and real
-Cursor quota, so delegating trivial edits is usually net-negative.
+See [examples/delegation-directive.md](examples/delegation-directive.md). Dial it
+up (delegate almost everything) or down (only on explicit request) by editing those
+bullets. Each delegation costs ~30–60s and real Cursor quota, so delegating trivial
+lookups or one-line edits is usually net-negative.
 
 ## Configuration
 
@@ -186,7 +201,7 @@ Optional config file `~/.config/claude-cursor-bridge/config` (plain `KEY=VALUE`,
 shell-sourced):
 
 ```bash
-CURSOR_BRIDGE_MODEL=composer-2
+CURSOR_BRIDGE_MODEL=composer-2.5
 CURSOR_BRIDGE_TIMEOUT=900
 ```
 
@@ -194,11 +209,11 @@ CURSOR_BRIDGE_TIMEOUT=900
 
 | Code | Meaning |
 |---|---|
-| 0 | Worker finished, diff ready for review |
+| 0 | Worker finished (edit: diff ready to review · ask: answer returned) |
 | 2 | Usage error |
-| 3 | Not a git repository |
+| 3 | Not a git repository (edit mode only — `--ask` runs anywhere) |
 | 4 | `cursor-agent` not installed |
-| 5 | Another worker holds this repo's lock |
+| 5 | Another worker holds this repo's lock (edit mode) |
 | 6 | Timeout (worker killed) |
 | 7 | Worker exited non-zero |
 
@@ -210,8 +225,8 @@ CURSOR_BRIDGE_TIMEOUT=900
 | `not authenticated` | `cursor-agent login` |
 | Exit 5 but nothing is running | Stale lock is auto-recovered when the owner pid is dead; if it persists: `rm -rf .git/cursor-bridge.lock` |
 | Worker times out on first run in a big repo | Cursor indexes the repo on first contact — raise `--timeout` / `CURSOR_BRIDGE_TIMEOUT` |
-| Claude never delegates | Check the plugin is enabled (`/plugin`) and the task actually matches the criteria (mechanical + self-contained); or ask explicitly |
-| Claude delegates too much | Tell it "don't delegate X"; durable tuning lives in the agent's `description` |
+| Claude never delegates | Check the plugin is enabled (`/plugin`); add the standing directive to `~/.claude/CLAUDE.md` (see Tuning) — it's the main lever — or ask explicitly |
+| Claude delegates too much | Soften the `~/.claude/CLAUDE.md` directive (see Tuning), or tell it "don't delegate X" in the moment |
 
 ## Limitations (v1, by design)
 
