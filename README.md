@@ -59,7 +59,7 @@ cursor-agent login        # opens a browser
 From GitHub:
 
 ```
-/plugin marketplace add aryabhatthere/claude-cursor-bridge
+/plugin marketplace add HeyAryaHere/claude-cursor-bridge
 /plugin install claude-cursor-bridge@cursor-bridge
 ```
 
