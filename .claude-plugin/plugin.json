@@ -1,0 +1,20 @@
+{
+  "name": "claude-cursor-bridge",
+  "displayName": "Claude Cursor Bridge",
+  "description": "Multi-agent bridge: Claude Code orchestrates, Cursor models (Composer & friends) execute well-scoped coding subtasks via the headless cursor-agent CLI. The git diff is the contract.",
+  "author": {
+    "name": "Arya",
+    "email": "heyaryahere@gmail.com"
+  },
+  "homepage": "https://github.com/aryabhatthere/claude-cursor-bridge",
+  "repository": "https://github.com/aryabhatthere/claude-cursor-bridge",
+  "license": "MIT",
+  "keywords": [
+    "cursor",
+    "composer",
+    "multi-agent",
+    "delegation",
+    "orchestration",
+    "subagent"
+  ]
+}

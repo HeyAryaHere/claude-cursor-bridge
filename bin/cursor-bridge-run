@@ -1,0 +1,272 @@
+#!/bin/bash
+# cursor-bridge-run — sanctioned entry point for delegating a coding task to a
+# Cursor model via the headless cursor-agent CLI (part of claude-cursor-bridge).
+#
+# Must work on stock macOS /bin/bash 3.2: no GNU coreutils, no `timeout`,
+# no associative arrays, no ${var,,}.
+
+set -o pipefail
+
+VERSION="0.1.0"
+
+usage() {
+  cat <<'EOF'
+Usage: cursor-bridge-run [options] [PROMPT|-]
+
+Delegate a self-contained coding task to a Cursor model inside the current
+git repository. The worker edits files autonomously (--force); the resulting
+git diff is the contract. A result block is printed for the caller to review.
+
+Options:
+  -C <dir>           Run in <dir> instead of the current directory
+  --model <name>     Cursor model (default: auto; see --list-models)
+  --timeout <secs>   Kill the worker after <secs> seconds (default: 600)
+  --resume <chatId>  Continue an existing cursor-agent chat (for fix-up retries)
+  --json             Emit the result block as JSON (requires jq)
+  --list-models      List models available to your Cursor account and exit
+  --version          Print version and exit
+  -h, --help         Show this help
+
+PROMPT is the task brief. Pass '-' (or pipe stdin) to read it from stdin —
+recommended for multi-line briefs.
+
+Exit codes:
+  0 ok          2 usage error      3 not a git repo
+  4 cursor-agent not installed     5 repo lock held by another worker
+  6 timeout     7 worker exited non-zero
+EOF
+}
+
+err() { printf 'cursor-bridge-run: %s\n' "$1" >&2; }
+
+# ---------------- config: defaults < config file < environment < flags ----
+DEF_MODEL="auto"
+DEF_TIMEOUT=600
+DEF_LOG_DIR="$HOME/.cache/claude-cursor-bridge"
+
+ENV_MODEL="${CURSOR_BRIDGE_MODEL:-}"
+ENV_TIMEOUT="${CURSOR_BRIDGE_TIMEOUT:-}"
+ENV_LOG_DIR="${CURSOR_BRIDGE_LOG_DIR:-}"
+
+CONFIG_FILE="${XDG_CONFIG_HOME:-$HOME/.config}/claude-cursor-bridge/config"
+if [ -f "$CONFIG_FILE" ]; then
+  # shellcheck disable=SC1090
+  . "$CONFIG_FILE"
+fi
+CFG_MODEL="${CURSOR_BRIDGE_MODEL:-}"
+CFG_TIMEOUT="${CURSOR_BRIDGE_TIMEOUT:-}"
+CFG_LOG_DIR="${CURSOR_BRIDGE_LOG_DIR:-}"
+
+FLAG_MODEL=""
+FLAG_TIMEOUT=""
+RESUME_ID=""
+JSON_OUT=0
+LIST_MODELS=0
+RUN_DIR=""
+PROMPT=""
+PROMPT_SET=0
+
+while [ $# -gt 0 ]; do
+  case "$1" in
+    -C)            [ $# -ge 2 ] || { err "-C needs an argument"; exit 2; }; RUN_DIR="$2"; shift 2 ;;
+    --model)       [ $# -ge 2 ] || { err "--model needs an argument"; exit 2; }; FLAG_MODEL="$2"; shift 2 ;;
+    --timeout)     [ $# -ge 2 ] || { err "--timeout needs an argument"; exit 2; }; FLAG_TIMEOUT="$2"; shift 2 ;;
+    --resume)      [ $# -ge 2 ] || { err "--resume needs an argument"; exit 2; }; RESUME_ID="$2"; shift 2 ;;
+    --json)        JSON_OUT=1; shift ;;
+    --list-models) LIST_MODELS=1; shift ;;
+    --version)     printf '%s\n' "$VERSION"; exit 0 ;;
+    -h|--help)     usage; exit 0 ;;
+    -)             PROMPT="-"; PROMPT_SET=1; shift ;;
+    --*)           err "unknown option: $1"; usage >&2; exit 2 ;;
+    *)             [ "$PROMPT_SET" -eq 1 ] && { err "multiple PROMPT arguments"; exit 2; }
+                   PROMPT="$1"; PROMPT_SET=1; shift ;;
+  esac
+done
+
+MODEL="${FLAG_MODEL:-${ENV_MODEL:-${CFG_MODEL:-$DEF_MODEL}}}"
+TIMEOUT="${FLAG_TIMEOUT:-${ENV_TIMEOUT:-${CFG_TIMEOUT:-$DEF_TIMEOUT}}}"
+LOG_DIR="${ENV_LOG_DIR:-${CFG_LOG_DIR:-$DEF_LOG_DIR}}"
+
+case "$TIMEOUT" in
+  ''|*[!0-9]*) err "--timeout must be a positive integer (got: $TIMEOUT)"; exit 2 ;;
+esac
+
+# ---------------- preflight ----------------------------------------------
+if ! command -v cursor-agent >/dev/null 2>&1; then
+  err "cursor-agent CLI not found."
+  err "install it with:   curl https://cursor.com/install -fsS | bash"
+  err "then authenticate: cursor-agent login"
+  exit 4
+fi
+
+if [ "$LIST_MODELS" -eq 1 ]; then
+  exec cursor-agent models
+fi
+
+if [ -n "$RUN_DIR" ]; then
+  cd "$RUN_DIR" 2>/dev/null || { err "cannot cd to: $RUN_DIR"; exit 2; }
+fi
+
+GIT_DIR=$(git rev-parse --absolute-git-dir 2>/dev/null)
+if [ -z "$GIT_DIR" ]; then
+  err "not inside a git repository — refusing to run an autonomous worker without version control."
+  exit 3
+fi
+REPO_ROOT=$(git rev-parse --show-toplevel)
+
+if [ -z "$PROMPT" ] || [ "$PROMPT" = "-" ]; then
+  if [ -t 0 ]; then
+    err "no PROMPT given and stdin is a terminal."
+    usage >&2
+    exit 2
+  fi
+  PROMPT=$(cat)
+fi
+if [ -z "$PROMPT" ]; then
+  err "empty task brief."
+  exit 2
+fi
+
+# ---------------- lock (one worker per repo) ------------------------------
+LOCK_DIR="$GIT_DIR/cursor-bridge.lock"
+OLD_PID=""
+
+acquire_lock() {
+  if mkdir "$LOCK_DIR" 2>/dev/null; then
+    printf '%s\n' "$$" > "$LOCK_DIR/pid"
+    return 0
+  fi
+  OLD_PID=$(cat "$LOCK_DIR/pid" 2>/dev/null)
+  if [ -n "$OLD_PID" ] && kill -0 "$OLD_PID" 2>/dev/null; then
+    return 1
+  fi
+  # stale lock — owner process is gone
+  rm -rf "$LOCK_DIR"
+  if mkdir "$LOCK_DIR" 2>/dev/null; then
+    printf '%s\n' "$$" > "$LOCK_DIR/pid"
+    return 0
+  fi
+  return 1
+}
+
+if ! acquire_lock; then
+  err "another cursor-bridge worker is already running in this repo (pid ${OLD_PID:-unknown})."
+  err "lock: $LOCK_DIR — wait for it to finish, or remove the lock if you are sure it is dead."
+  exit 5
+fi
+
+BASE_STATUS=""
+AFTER_STATUS=""
+OUT_FILE=""
+
+cleanup() {
+  rm -rf "$LOCK_DIR" 2>/dev/null
+  [ -n "$BASE_STATUS" ]  && rm -f "$BASE_STATUS"  2>/dev/null
+  [ -n "$AFTER_STATUS" ] && rm -f "$AFTER_STATUS" 2>/dev/null
+  [ -n "$OUT_FILE" ]     && rm -f "$OUT_FILE"     2>/dev/null
+}
+trap cleanup EXIT
+trap 'exit 130' INT
+trap 'exit 143' TERM
+
+# ---------------- run ------------------------------------------------------
+BASE_STATUS=$(mktemp -t cbridge-base) || exit 1
+AFTER_STATUS=$(mktemp -t cbridge-after) || exit 1
+OUT_FILE=$(mktemp -t cbridge-out) || exit 1
+
+git status --porcelain > "$BASE_STATUS" 2>/dev/null
+
+CHAT_ID="$RESUME_ID"
+if [ -z "$CHAT_ID" ]; then
+  # a known chat id lets the caller retry with --resume; degrade gracefully
+  CHAT_ID=$(cursor-agent create-chat 2>/dev/null | tr -d '[:space:]')
+fi
+
+START_TS=$(date +%s)
+
+set -- --print --force --trust --output-format text --model "$MODEL"
+if [ -n "$CHAT_ID" ]; then
+  set -- "$@" --resume "$CHAT_ID"
+fi
+
+cursor-agent "$@" "$PROMPT" > "$OUT_FILE" 2>&1 &
+AGENT_PID=$!
+
+(
+  sleep "$TIMEOUT"
+  kill -TERM "$AGENT_PID" 2>/dev/null
+  sleep 10
+  kill -KILL "$AGENT_PID" 2>/dev/null
+) &
+WATCHDOG_PID=$!
+
+wait "$AGENT_PID"
+AGENT_EXIT=$?
+kill "$WATCHDOG_PID" 2>/dev/null
+wait "$WATCHDOG_PID" 2>/dev/null
+
+END_TS=$(date +%s)
+DURATION=$((END_TS - START_TS))
+
+STATUS="ok"
+EXIT_CODE=0
+if [ "$AGENT_EXIT" -ne 0 ] && [ "$DURATION" -ge "$TIMEOUT" ]; then
+  STATUS="timeout"
+  EXIT_CODE=6
+elif [ "$AGENT_EXIT" -ne 0 ]; then
+  STATUS="error"
+  EXIT_CODE=7
+fi
+
+# ---------------- collect results -----------------------------------------
+git status --porcelain > "$AFTER_STATUS" 2>/dev/null
+CHANGED=$(comm -13 <(sort "$BASE_STATUS") <(sort "$AFTER_STATUS") 2>/dev/null)
+DIFF_STAT=$(git diff HEAD --stat 2>/dev/null)
+
+mkdir -p "$LOG_DIR" 2>/dev/null
+printf '%s\trepo=%s\tmodel=%s\tstatus=%s\tagent_exit=%s\tduration_s=%s\tchat_id=%s\n' \
+  "$(date '+%Y-%m-%dT%H:%M:%S%z')" "$REPO_ROOT" "$MODEL" "$STATUS" "$AGENT_EXIT" \
+  "$DURATION" "${CHAT_ID:-unknown}" >> "$LOG_DIR/runs.log" 2>/dev/null
+
+emit_text() {
+  printf '=== CURSOR-BRIDGE RESULT ===\n'
+  printf 'status: %s\n' "$STATUS"
+  printf 'agent_exit: %s\n' "$AGENT_EXIT"
+  printf 'model: %s\n' "$MODEL"
+  printf 'chat_id: %s\n' "${CHAT_ID:-unknown}"
+  printf 'duration_s: %s\n' "$DURATION"
+  printf 'repo: %s\n' "$REPO_ROOT"
+  printf -- '--- changed files (vs start of run) ---\n'
+  if [ -n "$CHANGED" ]; then printf '%s\n' "$CHANGED"; else printf '(none)\n'; fi
+  printf -- '--- git diff --stat (vs HEAD) ---\n'
+  if [ -n "$DIFF_STAT" ]; then printf '%s\n' "$DIFF_STAT"; else printf '(clean)\n'; fi
+  printf -- '--- worker output (last 80 lines) ---\n'
+  tail -n 80 "$OUT_FILE"
+  printf '=== END CURSOR-BRIDGE RESULT ===\n'
+}
+
+emit_json() {
+  jq -n \
+    --arg status "$STATUS" \
+    --arg model "$MODEL" \
+    --arg chat_id "${CHAT_ID:-}" \
+    --arg repo "$REPO_ROOT" \
+    --arg changed "$CHANGED" \
+    --arg diff_stat "$DIFF_STAT" \
+    --rawfile output "$OUT_FILE" \
+    --argjson agent_exit "$AGENT_EXIT" \
+    --argjson duration_s "$DURATION" \
+    '{status: $status, agent_exit: $agent_exit, model: $model,
+      chat_id: $chat_id, duration_s: $duration_s, repo: $repo,
+      changed_files: ($changed | split("\n") | map(select(length > 0))),
+      diff_stat: $diff_stat, output: $output}'
+}
+
+if [ "$JSON_OUT" -eq 1 ] && command -v jq >/dev/null 2>&1; then
+  emit_json
+else
+  [ "$JSON_OUT" -eq 1 ] && err "--json requested but jq not found; falling back to text"
+  emit_text
+fi
+
+exit "$EXIT_CODE"

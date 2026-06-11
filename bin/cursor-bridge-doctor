@@ -1,0 +1,75 @@
+#!/bin/bash
+# cursor-bridge-doctor — environment checks for claude-cursor-bridge.
+# Usage: cursor-bridge-doctor [--quiet]   (--quiet prints failures only)
+
+set -o pipefail
+
+QUIET=0
+[ "${1:-}" = "--quiet" ] && QUIET=1
+
+FAIL=0
+
+ok()  { [ "$QUIET" -eq 1 ] || printf '  \xE2\x9C\x93 %s\n' "$1"; }
+bad() {
+  printf '  \xE2\x9C\x97 %s\n' "$1"
+  printf '    \xE2\x86\x92 %s\n' "$2"
+  FAIL=$((FAIL + 1))
+}
+
+[ "$QUIET" -eq 1 ] || printf 'claude-cursor-bridge doctor\n\n'
+
+# 1. cursor-agent binary
+if command -v cursor-agent >/dev/null 2>&1; then
+  ok "cursor-agent installed ($(command -v cursor-agent))"
+
+  # 2. authentication
+  if cursor-agent status >/dev/null 2>&1; then
+    ok "authenticated with Cursor"
+  else
+    bad "not authenticated with Cursor" "run: cursor-agent login   (opens a browser)"
+  fi
+
+  # 3. models
+  MODELS_OUT=$(cursor-agent models 2>/dev/null)
+  if [ -n "$MODELS_OUT" ]; then
+    ok "models available:"
+    [ "$QUIET" -eq 1 ] || printf '%s\n' "$MODELS_OUT" | sed 's/^/      /'
+  else
+    bad "could not list models" "check auth first: cursor-agent status"
+  fi
+else
+  bad "cursor-agent CLI not installed" "curl https://cursor.com/install -fsS | bash"
+fi
+
+# 4. git
+if command -v git >/dev/null 2>&1; then
+  ok "git installed ($(git --version | head -1))"
+else
+  bad "git not installed" "xcode-select --install"
+fi
+
+# 5. log dir + effective config
+LOG_DIR="${CURSOR_BRIDGE_LOG_DIR:-$HOME/.cache/claude-cursor-bridge}"
+if mkdir -p "$LOG_DIR" 2>/dev/null && [ -w "$LOG_DIR" ]; then
+  ok "log dir writable: $LOG_DIR"
+else
+  bad "log dir not writable: $LOG_DIR" "set CURSOR_BRIDGE_LOG_DIR to a writable path"
+fi
+
+CONFIG_FILE="${XDG_CONFIG_HOME:-$HOME/.config}/claude-cursor-bridge/config"
+if [ -f "$CONFIG_FILE" ]; then
+  ok "config file present: $CONFIG_FILE"
+else
+  ok "no config file (defaults: model=auto, timeout=600s) — optional: $CONFIG_FILE"
+fi
+
+if [ "$QUIET" -eq 0 ]; then
+  printf '\n'
+  if [ "$FAIL" -eq 0 ]; then
+    printf 'All checks passed. cursor-worker is ready to delegate.\n'
+  else
+    printf '%s check(s) failed — fix the items above, then re-run.\n' "$FAIL"
+  fi
+fi
+
+[ "$FAIL" -eq 0 ] && exit 0 || exit 1

@@ -1,0 +1,15 @@
+{
+  "name": "cursor-bridge",
+  "description": "Single-plugin marketplace for claude-cursor-bridge — delegate mechanical coding tasks from Claude Code to Cursor models.",
+  "owner": {
+    "name": "Arya",
+    "email": "heyaryahere@gmail.com"
+  },
+  "plugins": [
+    {
+      "name": "claude-cursor-bridge",
+      "source": "./",
+      "description": "Opus orchestrates, Cursor executes — proactive delegation of mechanical coding tasks to Cursor models via the cursor-agent CLI."
+    }
+  ]
+}
