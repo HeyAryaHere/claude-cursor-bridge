@@ -1,5 +1,22 @@
 # Changelog
 
+## 0.3.0 — 2026-06-11
+
+Per-task model routing — spread work across models instead of funneling
+everything to Composer.
+
+- Per-mode default models: ask → `gemini-3.5-flash`, edit → `composer-2.5`.
+  Overridable via `CURSOR_BRIDGE_ASK_MODEL` / `CURSOR_BRIDGE_EDIT_MODEL` (env or
+  config). `CURSOR_BRIDGE_MODEL` still forces one model for everything.
+- Model precedence: `--model` flag > `CURSOR_BRIDGE_MODEL` > per-mode setting >
+  per-mode default.
+- `cursor-worker` agent gets an explicit routing table (investigation →
+  gemini-3.5-flash, routine edits → composer-2.5, hard work → gpt-5.5-high) and
+  is told to vary the model by task.
+- `cursor-bridge-doctor` prints the effective model routing.
+- Verified live: gemini-3.5-flash, composer-2.5(-fast), and gpt-5.5-high all
+  called successfully.
+
 ## 0.2.0 — 2026-06-11
 
 Cursor as a junior engineer — adds a read-only investigation mode alongside

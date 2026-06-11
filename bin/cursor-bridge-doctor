@@ -56,11 +56,26 @@ else
   bad "log dir not writable: $LOG_DIR" "set CURSOR_BRIDGE_LOG_DIR to a writable path"
 fi
 
+# 6. effective model routing (env wins over config, like the wrapper)
+_env_model="${CURSOR_BRIDGE_MODEL:-}"
+_env_ask="${CURSOR_BRIDGE_ASK_MODEL:-}"
+_env_edit="${CURSOR_BRIDGE_EDIT_MODEL:-}"
 CONFIG_FILE="${XDG_CONFIG_HOME:-$HOME/.config}/claude-cursor-bridge/config"
-if [ -f "$CONFIG_FILE" ]; then
-  ok "config file present: $CONFIG_FILE"
+# shellcheck disable=SC1090
+[ -f "$CONFIG_FILE" ] && . "$CONFIG_FILE"
+_model="${_env_model:-${CURSOR_BRIDGE_MODEL:-}}"
+_ask="${_env_ask:-${CURSOR_BRIDGE_ASK_MODEL:-gemini-3.5-flash}}"
+_edit="${_env_edit:-${CURSOR_BRIDGE_EDIT_MODEL:-composer-2.5}}"
+if [ -n "$_model" ]; then
+  ok "model routing: ALL calls -> '$_model' (CURSOR_BRIDGE_MODEL set)"
 else
-  ok "no config file (defaults: model=auto, timeout=600s) — optional: $CONFIG_FILE"
+  ok "model routing: ask -> $_ask  ·  edit -> $_edit  (agent may override per task)"
+fi
+
+if [ -f "$CONFIG_FILE" ]; then
+  ok "config file: $CONFIG_FILE"
+else
+  ok "config file: none (optional) — $CONFIG_FILE"
 fi
 
 if [ "$QUIET" -eq 0 ]; then

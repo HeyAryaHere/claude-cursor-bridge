@@ -14,7 +14,7 @@
 
 set -o pipefail
 
-VERSION="0.2.0"
+VERSION="0.3.0"
 
 usage() {
   cat <<'EOF'
@@ -28,7 +28,10 @@ makes no changes (no git repo required).
 Options:
   --ask              Read-only mode: investigate / answer; no edits, no diff
   -C <dir>           Run in <dir> instead of the current directory
-  --model <name>     Cursor model (default: auto; see --list-models)
+  --model <name>     Cursor model (see --list-models). Default is per mode:
+                     ask -> gemini-3.5-flash, edit -> composer-2.5. Override the
+                     defaults with CURSOR_BRIDGE_ASK_MODEL / _EDIT_MODEL, or
+                     force one model everywhere with CURSOR_BRIDGE_MODEL.
   --timeout <secs>   Kill the worker after <secs> seconds (default: 600)
   --resume <chatId>  Continue an existing cursor-agent chat
   --json             Emit the result block as JSON (requires jq)
@@ -48,12 +51,24 @@ EOF
 
 err() { printf 'cursor-bridge-run: %s\n' "$1" >&2; }
 
-# ---------------- config: defaults < config file < environment < flags ----
-DEF_MODEL="auto"
+# ---------------- config: per-mode model routing -------------------------
+# Model precedence:  --model flag
+#                  > CURSOR_BRIDGE_MODEL (forces one model for every call)
+#                  > per-mode env/config: CURSOR_BRIDGE_ASK_MODEL / _EDIT_MODEL
+#                  > built-in per-mode defaults below.
+# The per-mode defaults deliberately spread work across models instead of
+# funneling everything to one: read-only investigation -> a fast cheap model,
+# editing -> Cursor's coding specialist. The agent picks task-appropriate
+# models explicitly via --model (e.g. gpt-5.5-high for hard work).
+DEF_ASK_MODEL="gemini-3.5-flash"
+DEF_EDIT_MODEL="composer-2.5"
 DEF_TIMEOUT=600
 DEF_LOG_DIR="$HOME/.cache/claude-cursor-bridge"
 
+# capture environment before sourcing the config file (env wins over config)
 ENV_MODEL="${CURSOR_BRIDGE_MODEL:-}"
+ENV_ASK_MODEL="${CURSOR_BRIDGE_ASK_MODEL:-}"
+ENV_EDIT_MODEL="${CURSOR_BRIDGE_EDIT_MODEL:-}"
 ENV_TIMEOUT="${CURSOR_BRIDGE_TIMEOUT:-}"
 ENV_LOG_DIR="${CURSOR_BRIDGE_LOG_DIR:-}"
 
@@ -62,9 +77,13 @@ if [ -f "$CONFIG_FILE" ]; then
   # shellcheck disable=SC1090
   . "$CONFIG_FILE"
 fi
-CFG_MODEL="${CURSOR_BRIDGE_MODEL:-}"
-CFG_TIMEOUT="${CURSOR_BRIDGE_TIMEOUT:-}"
-CFG_LOG_DIR="${CURSOR_BRIDGE_LOG_DIR:-}"
+
+# effective source value = env if set, else whatever the config set (if any)
+EFF_MODEL="${ENV_MODEL:-${CURSOR_BRIDGE_MODEL:-}}"
+EFF_ASK_MODEL="${ENV_ASK_MODEL:-${CURSOR_BRIDGE_ASK_MODEL:-}}"
+EFF_EDIT_MODEL="${ENV_EDIT_MODEL:-${CURSOR_BRIDGE_EDIT_MODEL:-}}"
+EFF_TIMEOUT="${ENV_TIMEOUT:-${CURSOR_BRIDGE_TIMEOUT:-}}"
+LOG_DIR="${ENV_LOG_DIR:-${CURSOR_BRIDGE_LOG_DIR:-$DEF_LOG_DIR}}"
 
 MODE="edit"
 FLAG_MODEL=""
@@ -94,9 +113,18 @@ while [ $# -gt 0 ]; do
   esac
 done
 
-MODEL="${FLAG_MODEL:-${ENV_MODEL:-${CFG_MODEL:-$DEF_MODEL}}}"
-TIMEOUT="${FLAG_TIMEOUT:-${ENV_TIMEOUT:-${CFG_TIMEOUT:-$DEF_TIMEOUT}}}"
-LOG_DIR="${ENV_LOG_DIR:-${CFG_LOG_DIR:-$DEF_LOG_DIR}}"
+# resolve the model now that MODE is known (see precedence note above)
+if [ -n "$FLAG_MODEL" ]; then
+  MODEL="$FLAG_MODEL"
+elif [ -n "$EFF_MODEL" ]; then
+  MODEL="$EFF_MODEL"
+elif [ "$MODE" = "ask" ]; then
+  MODEL="${EFF_ASK_MODEL:-$DEF_ASK_MODEL}"
+else
+  MODEL="${EFF_EDIT_MODEL:-$DEF_EDIT_MODEL}"
+fi
+
+TIMEOUT="${FLAG_TIMEOUT:-${EFF_TIMEOUT:-$DEF_TIMEOUT}}"
 
 case "$TIMEOUT" in
   ''|*[!0-9]*) err "--timeout must be a positive integer (got: $TIMEOUT)"; exit 2 ;;

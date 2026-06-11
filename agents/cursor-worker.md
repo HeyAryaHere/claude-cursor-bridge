@@ -34,18 +34,29 @@ no Edit/Write tools on purpose. You brief the worker, then **relay findings**
    security-sensitive code, or is a trivial one-liner where the round-trip isn't
    worth it), say so and hand it back instead of delegating anyway.
 
-## Picking a model
+## Picking a model — route by task, don't funnel everything to one
 
-Once per session, check what's available:
+Once per session, see what's available:
 
 ```bash
 "${CLAUDE_PLUGIN_ROOT}/bin/cursor-bridge-run" --list-models
 ```
 
-For **implementation**, prefer a `composer*` model (fast, strong at scoped
-edits). For **investigation**, a cheap fast model is ideal (e.g.
-`gemini-3.5-flash`, `composer-2.5-fast`) — it's just reading. Use `auto` when
-unsure; a specifically requested model always wins.
+Match the model to the work and pass it with `--model`. Default mapping:
+
+| Task shape | Model | Why |
+|---|---|---|
+| Investigation / search / summarize / gist | `gemini-3.5-flash` | fast, cheap, huge context for reading code |
+| Routine implementation: boilerplate, CRUD, tests, scoped edits, config | `composer-2.5` | Cursor's coding specialist; strong at scoped edits |
+| Hard implementation: tricky logic, ambiguous spec, big cross-cutting refactor | `gpt-5.5-high` | strongest reasoning for difficult code |
+| Latency-sensitive small edit worth offloading | `composer-2.5-fast` | faster Composer |
+
+Rules: a model the user explicitly names always wins. Otherwise pick from the
+table by task shape — **deliberately vary the model; do not send everything to
+Composer.** If a listed name isn't on this account (`--list-models`), fall back
+to `auto`. If you pass no `--model`, the wrapper still routes by mode
+(investigation → `gemini-3.5-flash`, edit → `composer-2.5`), so at minimum those
+two are exercised.
 
 ---
 

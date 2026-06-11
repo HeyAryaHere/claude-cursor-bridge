@@ -187,21 +187,31 @@ up (delegate almost everything) or down (only on explicit request) by editing th
 bullets. Each delegation costs ~30–60s and real Cursor quota, so delegating trivial
 lookups or one-line edits is usually net-negative.
 
-## Configuration
+## Configuration & model routing
 
-Precedence: CLI flag > environment > config file > default.
+Per-setting precedence: CLI flag > environment variable > config file > default.
 
-| Setting | Env var | Config key | Default |
-|---|---|---|---|
-| Model | `CURSOR_BRIDGE_MODEL` | same | `auto` |
-| Timeout (s) | `CURSOR_BRIDGE_TIMEOUT` | same | `600` |
-| Log dir | `CURSOR_BRIDGE_LOG_DIR` | same | `~/.cache/claude-cursor-bridge` |
+| Setting | Env var / config key | Default |
+|---|---|---|
+| Model for **ask** (read-only) | `CURSOR_BRIDGE_ASK_MODEL` | `gemini-3.5-flash` |
+| Model for **edit** | `CURSOR_BRIDGE_EDIT_MODEL` | `composer-2.5` |
+| Force one model for **all** calls | `CURSOR_BRIDGE_MODEL` | (unset) |
+| Timeout (s) | `CURSOR_BRIDGE_TIMEOUT` | `600` |
+| Log dir | `CURSOR_BRIDGE_LOG_DIR` | `~/.cache/claude-cursor-bridge` |
+
+**Model resolution:** `--model` flag → `CURSOR_BRIDGE_MODEL` → the per-mode
+setting (`_ASK_MODEL` / `_EDIT_MODEL`) → per-mode default. So out of the box,
+read-only work goes to **Gemini Flash** and edits go to **Composer**, while the
+agent routes harder tasks to other models (e.g. **`gpt-5.5-high`**) explicitly —
+work spreads across models instead of piling onto one. Set `CURSOR_BRIDGE_MODEL`
+only if you want to pin everything to a single model.
 
 Optional config file `~/.config/claude-cursor-bridge/config` (plain `KEY=VALUE`,
-shell-sourced):
+shell-sourced; keys match the env var names):
 
 ```bash
-CURSOR_BRIDGE_MODEL=composer-2.5
+CURSOR_BRIDGE_ASK_MODEL=gemini-3.5-flash
+CURSOR_BRIDGE_EDIT_MODEL=composer-2.5
 CURSOR_BRIDGE_TIMEOUT=900
 ```
 
